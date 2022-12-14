@@ -25,11 +25,765 @@ from sklearn.model_selection import *
 
 pd.set_option('display.max_columns', None)
 
+from os import path
+import sqlite3
 
 # connect to data provided by Kaggle
 # I downloaded the data to my personal folder
 
-DATA_PATH = '/Users/jeffreymullahey/Documents/GitHub/marchmadness2022/mens-march-mania-2022/MDataFiles_Stage1'
+DATA_HOME = '/Users/jeffreymullahey/Documents/GitHub/marchmadness2022/mens-march-mania-2022/'
+DATA_PATH = '/Users/jeffreymullahey/Documents/GitHub/marchmadness2022/mens-march-mania-2022/MDataFiles_Stage1/'
+
 
 for filename in os.listdir(DATA_PATH):
     print(filename)
+    
+    
+
+# seeds = vary important for predicting outcome
+df_seeds = pd.read_csv(DATA_PATH + "MNCAATourneySeeds.csv")
+df_seeds.head()
+
+
+df_season_results = pd.read_csv(DATA_PATH + "MRegularSeasonCompactResults.csv")
+df_season_results.head()
+df_season_results.drop(['NumOT', 'WLoc'], axis=1, inplace=True)
+df_season_results.head()
+
+df_season_results['ScoreGap'] = df_season_results['WScore'] - df_season_results['LScore']
+df_season_results.head()
+
+
+
+
+
+
+
+
+# use the winning and losing team id's to model total wins and losses per team per season
+num_win = df_season_results.groupby(['Season', 'WTeamID']).count()
+num_win.head()
+num_win = num_win.reset_index()[['Season', 'WTeamID', 'DayNum']].rename(columns={"DayNum": "NumWins", "WTeamID": "TeamID"})
+num_win.head()
+
+
+num_loss = df_season_results.groupby(['Season', 'LTeamID']).count()
+num_loss = num_loss.reset_index()[['Season', 'LTeamID', 'DayNum']].rename(columns={"DayNum": "NumLosses", "LTeamID": "TeamID"})
+
+
+
+
+
+
+
+
+
+
+
+# calculate avg win margin and avg loss margin per team per season
+gap_win = df_season_results.groupby(['Season', 'WTeamID']).mean().reset_index()
+gap_win.head()
+gap_win = gap_win[['Season', 'WTeamID', 'ScoreGap']].rename(columns={"ScoreGap": "GapWins", "WTeamID": "TeamID"})
+gap_win.head()
+
+
+
+gap_loss = df_season_results.groupby(['Season', 'LTeamID']).mean().reset_index()
+gap_loss = gap_loss[['Season', 'LTeamID', 'ScoreGap']].rename(columns={"ScoreGap": "GapLosses", "LTeamID": "TeamID"})
+
+
+
+
+
+
+
+# not totally sure why this step is necessary
+# seems like it's just a distinct set of season and team id
+# I guess you have to concat winning and losing id's because a team could have went undefeated or winless in a season?
+df_features_season_w = df_season_results.groupby(['Season', 'WTeamID']).count().reset_index()[['Season', 'WTeamID']].rename(columns={"WTeamID": "TeamID"})
+df_features_season_w.head()
+df_features_season_l = df_season_results.groupby(['Season', 'LTeamID']).count().reset_index()[['Season', 'LTeamID']].rename(columns={"LTeamID": "TeamID"})
+df_features_season_l.head()
+
+
+df_features_season = pd.concat([df_features_season_w, df_features_season_l], 0).drop_duplicates().sort_values(['Season', 'TeamID']).reset_index(drop=True)
+df_features_season.head()
+
+
+# join results together, will have total wins/losses & avg margin, per team per season
+df_features_season = df_features_season.merge(num_win, on=['Season', 'TeamID'], how='left')
+df_features_season = df_features_season.merge(num_loss, on=['Season', 'TeamID'], how='left')
+df_features_season = df_features_season.merge(gap_win, on=['Season', 'TeamID'], how='left')
+df_features_season = df_features_season.merge(gap_loss, on=['Season', 'TeamID'], how='left')
+df_features_season.head()
+
+df_features_season.fillna(0, inplace=True)  
+
+
+
+
+
+
+
+
+
+
+# create features
+df_features_season['WinRatio'] = df_features_season['NumWins'] / (df_features_season['NumWins'] + df_features_season['NumLosses'])
+df_features_season.head()
+df_features_season['GapAvg'] = (
+    (df_features_season['NumWins'] * df_features_season['GapWins'] - 
+    df_features_season['NumLosses'] * df_features_season['GapLosses'])
+    / (df_features_season['NumWins'] + df_features_season['NumLosses'])
+)
+df_features_season.head()
+
+
+# just keep the 2 features of interest: winratio and gapavg
+df_features_season.drop(['NumWins', 'NumLosses', 'GapWins', 'GapLosses'], axis=1, inplace=True)
+df_features_season.head()
+
+
+
+# add the season avg for other features of interest
+# create connection
+conn = sqlite3.connect(path.join(DATA_HOME, 'mm.sqlite'))
+
+df_season_detailed_results = pd.read_csv(DATA_PATH + "MRegularSeasonDetailedResults.csv")
+df_season_detailed_results.to_sql('df_season_detailed_results', conn, index=False, if_exists='replace')
+
+
+df_season_detailed_results2 = pd.read_sql(
+    """
+    SELECT TeamID,
+        Season,
+        sum(FGM3) as FGM3,
+        sum(FGA3) as FGA3
+    FROM (
+    SELECT WTeamID as TeamID,
+        Season,
+        WFGM3 as FGM3,
+        WFGA3 as FGA3
+    FROM df_season_detailed_results
+    WHERE Season >= 2016
+    UNION
+    SELECT LTeamID as TeamID,
+        Season,
+        LFGM3 as FGM3,
+        LFGA3 as FGA3
+    FROM df_season_detailed_results
+    WHERE Season >= 2016
+    )
+    GROUP BY TeamID,
+        Season
+    """, conn)
+df_season_detailed_results2.head()
+
+df_season_detailed_results2['FG3Perc'] = df_season_detailed_results2['FGM3'] / df_season_detailed_results2['FGA3'] 
+df_season_detailed_results2.head()
+
+
+df_features_season_vf = df_features_season.merge(df_season_detailed_results2, on=['Season', 'TeamID'], how='left')
+df_features_season_vf = df_features_season_vf[df_features_season_vf['Season'] >= 2016].reset_index(drop=True)
+df_features_season_vf.head()
+
+df_features_season_vf.fillna(0, inplace=True)  
+
+
+
+
+
+
+df_tourney_results = pd.read_csv(DATA_PATH + "MNCAATourneyCompactResults.csv")
+df_tourney_results.head()
+df_tourney_results.drop(['NumOT', 'WLoc'], axis=1, inplace=True)
+df_tourney_results.head()
+
+
+
+
+# load in the prescraped 538 data from kaggle https://www.kaggle.com/datasets/raddar/ncaa-men-538-team-ratings
+df_538 = pd.read_csv('/Users/jeffreymullahey/Documents/GitHub/marchmadness2022/538ratingsMen.csv')
+df_538.head()
+df_538.drop('TeamName', axis=1, inplace=True)
+df_538.head()
+
+
+
+
+# create the target variable
+# df is the 2016 onward tourney results with team season stats added (team stats include tourney games - don't love that)
+# it's duplicated so the first half will all be team A wins and the second half will all be team B wins
+df['ScoreDiff'] = df['ScoreA'] - df['ScoreB']
+df['WinA'] = (df['ScoreDiff'] > 0).astype(int)
+df.head()
+
+
+
+df = df_tourney_results.copy()
+df = df[df['Season'] >= 2016].reset_index(drop=True)
+df.head()
+
+
+
+
+# add seeds to the tourney data
+df = pd.merge(
+    df, 
+    df_seeds, 
+    how='left', 
+    left_on=['Season', 'WTeamID'], 
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'Seed': 'SeedW'})
+df.head()
+
+df = pd.merge(
+    df, 
+    df_seeds, 
+    how='left', 
+    left_on=['Season', 'LTeamID'], 
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'Seed': 'SeedL'})
+df.head()
+
+
+# create function to use regular expressions for cleaning seed
+# not sure why you have to create a function to do this
+def treat_seed(seed):
+    return int(re.sub("[^0-9]", "", seed))
+
+
+df['SeedW'] = df['SeedW'].apply(treat_seed)
+df['SeedL'] = df['SeedL'].apply(treat_seed)
+df.head()
+
+
+
+
+
+
+
+# merge in winning team's regular season stats
+df = pd.merge(
+    df,
+    df_features_season_vf,
+    how='left',
+    left_on=['Season', 'WTeamID'],
+    right_on=['Season', 'TeamID']
+).rename(columns={
+    'NumWins': 'NumWinsW',
+    'NumLosses': 'NumLossesW',
+    'GapWins': 'GapWinsW',
+    'GapLosses': 'GapLossesW',
+    'WinRatio': 'WinRatioW',
+    'GapAvg': 'GapAvgW',
+    'FG3Perc': 'FG3PercW',
+}).drop(columns=['TeamID', 'FGM3', 'FGA3'], axis=1)
+df.head()
+
+
+
+
+# and losing team
+df = pd.merge(
+    df,
+    df_features_season_vf,
+    how='left',
+    left_on=['Season', 'LTeamID'],
+    right_on=['Season', 'TeamID']
+).rename(columns={
+    'NumWins': 'NumWinsL',
+    'NumLosses': 'NumLossesL',
+    'GapWins': 'GapWinsL',
+    'GapLosses': 'GapLossesL',
+    'WinRatio': 'WinRatioL',
+    'GapAvg': 'GapAvgL',
+    'FG3Perc': 'FG3PercL',
+}).drop(columns=['TeamID', 'FGM3', 'FGA3'], axis=1)
+df.head()
+
+
+
+
+
+
+
+
+df = pd.merge(
+    df,
+    df_538,
+    how='left',
+    left_on=['Season', 'WTeamID'],
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'538rating': '538ratingW'})
+df.head()
+
+
+
+
+df = pd.merge(
+    df, 
+    df_538, 
+    how='left', 
+    left_on=['Season', 'LTeamID'], 
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'538rating': '538ratingL'})
+df.head()
+
+
+
+# create a function to double the data and drop win loss from column names
+def add_losing_matches(df):
+    win_rename = {
+        "WTeamID": "TeamIdA", 
+        "WScore" : "ScoreA", 
+        "LTeamID" : "TeamIdB",
+        "LScore": "ScoreB",
+     }
+    win_rename.update({c : c[:-1] + "A" for c in df.columns if c.endswith('W')})
+    win_rename.update({c : c[:-1] + "B" for c in df.columns if c.endswith('L')})
+    
+    lose_rename = {
+        "WTeamID": "TeamIdB", 
+        "WScore" : "ScoreB", 
+        "LTeamID" : "TeamIdA",
+        "LScore": "ScoreA",
+    }
+    lose_rename.update({c : c[:-1] + "B" for c in df.columns if c.endswith('W')})
+    lose_rename.update({c : c[:-1] + "A" for c in df.columns if c.endswith('L')})
+    
+    win_df = df.copy()
+    lose_df = df.copy()
+    
+    win_df = win_df.rename(columns=win_rename)
+    lose_df = lose_df.rename(columns=lose_rename)
+    
+    return pd.concat([win_df, lose_df], 0, sort=False)
+
+
+
+df = add_losing_matches(df)
+df.head()
+
+
+
+
+
+
+
+
+
+# take the difference in stats for each team
+# our model will be "did team 1 win?" and will use the season stat differences to predict
+cols_to_diff = [
+    'Seed', 'WinRatio', 'GapAvg', 'FG3Perc', '538rating'
+]
+
+for col in cols_to_diff:
+    df[col + 'Diff'] = df[col + 'A'] - df[col + 'B']
+df.head()
+
+
+
+
+
+
+
+# train model using 2016 - 2019 seasons, validate using 2021 season
+df_train = df[df['Season'] != 2021].reset_index(drop=True).copy()
+df_val = df[df['Season'] == 2021].reset_index(drop=True).copy()
+
+
+features = [
+    'SeedDiff',
+    '538ratingDiff',
+    'WinRatioDiff', 
+    #'FG3PercDiff', 
+    'GapAvgDiff', 
+]
+
+# normalize the features
+min_ = df_train[features].min()
+max_ = df_train[features].max()
+    
+df_train[features] = (df_train[features] - min_) / (max_ - min_)
+df_train.head()
+df_val[features] = (df_val[features] - min_) / (max_ - min_)
+
+        
+model = LogisticRegression(C=100)
+
+
+target = "WinA"
+
+model.fit(df_train[features], df_train[target])
+
+coef = model.coef_[0]
+coef
+
+pred = model.predict_proba(df_val[features])[:, 1]
+
+_ = sns.displot(pred)
+
+
+        
+loss = log_loss(df_val['WinA'].values, pred)
+
+print(f'\t -> Scored {loss:.3f}')
+# 0.624 (was 0.619 before I added 3FGPerc)
+# my submission was 0.66736
+
+
+
+from sklearn import metrics
+from sklearn.metrics import confusion_matrix
+
+y_pred_train = model.predict(df_train[features])
+print("Accuracy:", metrics.accuracy_score(df_train[target], y_pred_train))
+# 72.3% accurate on training
+
+
+y_pred_val = model.predict(df_val[features])
+print("Accuracy:", metrics.accuracy_score(df_val[target], y_pred_val))
+# 68.2% accurate on validation
+
+
+plot_confusion_matrix(model, 
+                      df_val[features], 
+                      df_val[target],
+                      values_format='d',
+                      display_labels=["Lost", "Won"])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# create stage 1 submission
+df_stage1 = pd.read_csv(DATA_PATH + "MSampleSubmissionStage1.csv")
+df_stage1.head()
+_ = sns.displot(df_stage1['Pred'])
+
+df_stage1['Season'] = df_stage1['ID'].apply(lambda x: int(x.split('_')[0]))
+df_stage1['TeamIdA'] = df_stage1['ID'].apply(lambda x: int(x.split('_')[1]))
+df_stage1['TeamIdB'] = df_stage1['ID'].apply(lambda x: int(x.split('_')[2]))
+df_stage1.head()
+
+
+
+
+# merge in seeds
+df_stage1 = pd.merge(
+    df_stage1,
+    df_seeds,
+    how='left',
+    left_on=['Season', 'TeamIdA'],
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'Seed': 'SeedA'})
+df_stage1.head()
+
+df_stage1 = pd.merge(
+    df_stage1, 
+    df_seeds, 
+    how='left', 
+    left_on=['Season', 'TeamIdB'], 
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'Seed': 'SeedB'})
+df_stage1.head()
+
+df_stage1['SeedA'] = df_stage1['SeedA'].apply(treat_seed)
+df_stage1['SeedB'] = df_stage1['SeedB'].apply(treat_seed)
+df_stage1.head()
+
+
+
+
+
+# add in the season stats - not including 3fg perc because it made model worse
+df_stage1 = pd.merge(
+    df_stage1,
+    df_features_season,
+    how='left',
+    left_on=['Season', 'TeamIdA'],
+    right_on=['Season', 'TeamID']
+).rename(columns={
+    'NumWins': 'NumWinsA',
+    'NumLosses': 'NumLossesA',
+    'GapWins': 'GapWinsA',
+    'GapLosses': 'GapLossesA',
+    'WinRatio': 'WinRatioA',
+    'GapAvg': 'GapAvgA',
+}).drop(columns='TeamID', axis=1)
+df_stage1.head()
+
+df_stage1 = pd.merge(
+    df_stage1,
+    df_features_season,
+    how='left',
+    left_on=['Season', 'TeamIdB'],
+    right_on=['Season', 'TeamID']
+).rename(columns={
+    'NumWins': 'NumWinsB',
+    'NumLosses': 'NumLossesB',
+    'GapWins': 'GapWinsB',
+    'GapLosses': 'GapLossesB',
+    'WinRatio': 'WinRatioB',
+    'GapAvg': 'GapAvgB',
+}).drop(columns='TeamID', axis=1)
+df_stage1.head()
+    
+    
+    
+    
+# add 538 rankings  
+df_stage1 = pd.merge(
+    df_stage1,
+    df_538,
+    how='left',
+    left_on=['Season', 'TeamIdA'],
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'538rating': '538ratingA'})
+df_stage1.head()
+
+df_stage1 = pd.merge(
+    df_stage1,
+    df_538,
+    how='left',
+    left_on=['Season', 'TeamIdB'],
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'538rating': '538ratingB'})
+df_stage1.head()
+
+
+
+
+
+df_stage1['SeedDiff'] = df_stage1['SeedA'] - df_stage1['SeedB']
+df_stage1['WinRatioDiff'] = df_stage1['WinRatioA'] - df_stage1['WinRatioB']
+df_stage1['GapAvgDiff'] = df_stage1['GapAvgA'] - df_stage1['GapAvgB']
+df_stage1['538ratingDiff'] = df_stage1['538ratingA'] - df_stage1['538ratingB']
+df_stage1.head()
+
+
+
+# normalize the features
+min_2 = df_stage1[features].min()
+max_2 = df_stage1[features].max()
+    
+df_stage1[features] = (df_stage1[features] - min_2) / (max_2 - min_2)
+df_stage1[features].head()
+
+
+
+
+pred_stg1 = model.predict_proba(df_stage1[features])[:, 1]
+_ = sns.displot(pred_stg1)
+
+
+
+stage1submission = df_stage1[['ID', 'Pred']].copy()
+
+stage1submission['Pred'] = pred_stg1
+stage1submission.head()
+
+stage1submission.to_csv(path.join(DATA_PATH, 'stage1submission_dec14_2022.csv'))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# create stage 2 submission
+
+DATA_PATH2 = '/Users/jeffreymullahey/Documents/GitHub/marchmadness2022/mens-march-mania-2022/MDataFiles_Stage2/'
+
+
+df_stage2 = pd.read_csv(DATA_PATH2 + "MSampleSubmissionstage2.csv")
+df_stage2.head()
+_ = sns.displot(df_stage2['Pred'])
+
+df_stage2['Season'] = df_stage2['ID'].apply(lambda x: int(x.split('_')[0]))
+df_stage2['TeamIdA'] = df_stage2['ID'].apply(lambda x: int(x.split('_')[1]))
+df_stage2['TeamIdB'] = df_stage2['ID'].apply(lambda x: int(x.split('_')[2]))
+df_stage2.head()
+
+
+
+
+# merge in seeds
+df_seeds2 = pd.read_csv(DATA_PATH2 + "MNCAATourneySeeds.csv")
+df_seeds2.head()
+
+df_stage2 = pd.merge(
+    df_stage2,
+    df_seeds2,
+    how='left',
+    left_on=['Season', 'TeamIdA'],
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'Seed': 'SeedA'})
+df_stage2.head()
+
+df_stage2 = pd.merge(
+    df_stage2, 
+    df_seeds2, 
+    how='left', 
+    left_on=['Season', 'TeamIdB'], 
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'Seed': 'SeedB'})
+df_stage2.head()
+
+df_stage2['SeedA'] = df_stage2['SeedA'].apply(treat_seed)
+df_stage2['SeedB'] = df_stage2['SeedB'].apply(treat_seed)
+df_stage2.head()
+
+
+
+
+
+
+
+
+
+
+# add in the season stats - not including 3fg perc because it made model worse
+df_stage2 = pd.merge(
+    df_stage2,
+    df_features_season,
+    how='left',
+    left_on=['Season', 'TeamIdA'],
+    right_on=['Season', 'TeamID']
+).rename(columns={
+    'NumWins': 'NumWinsA',
+    'NumLosses': 'NumLossesA',
+    'GapWins': 'GapWinsA',
+    'GapLosses': 'GapLossesA',
+    'WinRatio': 'WinRatioA',
+    'GapAvg': 'GapAvgA',
+}).drop(columns='TeamID', axis=1)
+df_stage2.head()
+
+df_stage2 = pd.merge(
+    df_stage2,
+    df_features_season,
+    how='left',
+    left_on=['Season', 'TeamIdB'],
+    right_on=['Season', 'TeamID']
+).rename(columns={
+    'NumWins': 'NumWinsB',
+    'NumLosses': 'NumLossesB',
+    'GapWins': 'GapWinsB',
+    'GapLosses': 'GapLossesB',
+    'WinRatio': 'WinRatioB',
+    'GapAvg': 'GapAvgB',
+}).drop(columns='TeamID', axis=1)
+df_stage2.head()
+    
+    
+    
+    
+# add 538 rankings  
+df_stage2 = pd.merge(
+    df_stage2,
+    df_538,
+    how='left',
+    left_on=['Season', 'TeamIdA'],
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'538rating': '538ratingA'})
+df_stage2.head()
+
+df_stage2 = pd.merge(
+    df_stage2,
+    df_538,
+    how='left',
+    left_on=['Season', 'TeamIdB'],
+    right_on=['Season', 'TeamID']
+).drop('TeamID', axis=1).rename(columns={'538rating': '538ratingB'})
+df_stage2.head()
+
+
+
+
+
+df_stage2['SeedDiff'] = df_stage2['SeedA'] - df_stage2['SeedB']
+df_stage2['WinRatioDiff'] = df_stage2['WinRatioA'] - df_stage2['WinRatioB']
+df_stage2['GapAvgDiff'] = df_stage2['GapAvgA'] - df_stage2['GapAvgB']
+df_stage2['538ratingDiff'] = df_stage2['538ratingA'] - df_stage2['538ratingB']
+df_stage2.head()
+
+
+
+# normalize the features
+min_3 = df_stage2[features].min()
+max_3 = df_stage2[features].max()
+    
+df_stage2[features] = (df_stage2[features] - min_3) / (max_3 - min_3)
+df_stage2[features].head()
+
+
+
+
+pred_stg2 = model.predict_proba(df_stage2[features])[:, 1]
+_ = sns.displot(pred_stg2)
+
+
+
+stage2submission = df_stage2[['ID', 'Pred']].copy()
+
+stage2submission['Pred'] = pred_stg2
+stage2submission.head()
+
+stage2submission.to_csv(path.join(DATA_PATH2, 'stage2submission_dec14_2022.csv'))
+# logloss would have been 0.6
+# better than the 0.667 my xgboost model scored
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
