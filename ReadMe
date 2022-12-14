@@ -1,6 +1,8 @@
-ReadMe
 
-I need to add lots of context to how I got to the final_training_data_v5.csv file.
+Modeling is done in the "logistic_regression" file within the mens-march-mania-2022 folder.
 
-I did all of my data prep in SAS EG on my corporate computer, that I have since lost access too. Thus, I will briefly describe the 
-steps I took to assemble this file.
+Data for the competition is provided by kaggle here: https://www.kaggle.com/competitions/mens-march-mania-2022/data
+
+I downloaded the data onto my local computer and pointed my python code to it locally. You would have to change the folder names if you wanted to run this code.
+
+I originally did this competition using SAS to do all the data cleaning/prep, and then built and XGBoost classification model in python. I lost all of that code though so this repository is a redo of the whole thing.
